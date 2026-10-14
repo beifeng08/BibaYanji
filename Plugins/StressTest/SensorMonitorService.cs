@@ -1,11 +1,12 @@
 using System.IO;
 using LibreHardwareMonitor.Hardware;
+using YanJi.Hardware;
 
 namespace YanJi.Plugin.StressTest;
 
 /// <summary>散热测试页数据监控：独立 LHM Computer 2 秒轮询
 /// CPU Package 温度/功耗、GPU 温度/功耗 四路传感器，事件回报给页面画折线图。
-/// 与 HardwareInfoService 的一过性采集互不干扰（各自开各自 Computer，用完即关）。
+/// 与配置核对共用 LhmComputerAccess，完整生命周期互斥，避免关闭彼此的静态资源。
 /// 生命周期：页面 Loaded 开、Unloaded 关；不卡 UI（全程后台线程）。
 /// 降级口径：传感器未找到 / 值为 null / 值 ≤0（AMD CPU 无 PawnIO 驱动时 LHM 给的是常驻 0）
 /// 一律视为「不可用」，页面显示占位文案，其余可用路照常工作。
@@ -37,6 +38,8 @@ public static class SensorMonitorService
     static readonly object _gate = new();
     static CancellationTokenSource? _cts;
     static Task? _loop;
+    static bool _requested;
+    public static event Action<string>? Failed;
     // 传感器/硬件引用全部在 loop 线程写、锁内读（换绑由 loop 线程在下个采样周期应用，不跨线程摆弄）
     static IHardware? _cpu, _gpu;
     static ISensor? _cpuTemp, _cpuPower, _gpuTemp, _gpuPower;
@@ -44,32 +47,49 @@ public static class SensorMonitorService
     static int _gpuIndex = -1;        // 当前生效的显卡索引
     static int _pendingGpuIndex = -1; // 页面请求换绑的目标索引（loop 下轮应用）
 
-    public static bool IsRunning { get { lock (_gate) return _loop is { IsCompleted: false }; } }
+    public static bool IsRunning { get { lock (_gate) return _loop != null; } }
+    // 页面入队时捕获当前轮次，Stop 后连同已入队的 UI 回调一起作废。
+    public static CancellationToken SessionToken { get { lock (_gate) return _cts?.Token ?? new CancellationToken(true); } }
 
     /// <summary>开始轮询（幂等：已在跑则直接返回）。Computer.Open 较慢，全程后台线程。</summary>
     public static void Start()
     {
         lock (_gate)
         {
+            _requested = true;
             if (IsRunning) return;
-            _cts = new CancellationTokenSource();
-            _loop = Task.Run(() => Loop(_cts.Token));
+            StartLoop();
         }
     }
 
-    /// <summary>停止轮询并释放 Computer（同步等退出，最多 3 秒）。</summary>
+    // 只在 _gate 内调用；结束后才允许下一轮，CTS 由完成回调释放。
+    static void StartLoop()
+    {
+        var source = new CancellationTokenSource();
+        _cts = source;
+        var loop = Task.Run(() => Loop(source.Token));
+        _loop = loop;
+        _ = loop.ContinueWith(_ =>
+        {
+            lock (_gate)
+            {
+                bool restart = _requested && source.IsCancellationRequested;
+                _loop = null;
+                _cts = null;
+                source.Dispose();
+                if (restart) StartLoop();
+            }
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>请求停止，不阻塞 UI；原生调用返回后关闭 Computer，完成前不启动第二轮。</summary>
     public static void Stop()
     {
-        Task? loop;
         lock (_gate)
         {
-            loop = _loop;
-            _loop = null;
-            try { _cts?.Cancel(); } catch { /* 忽略 */ }
-            _cts?.Dispose();
-            _cts = null;
+            _requested = false;
+            _cts?.Cancel();
         }
-        try { loop?.Wait(3000); } catch { /* 退出异常不影响清理 */ }
     }
 
     /// <summary>切换监控显卡（立即发 GpuChanging 让页面清两图旧曲线；实际换绑由轮询线程在下个
@@ -92,8 +112,28 @@ public static class SensorMonitorService
         try
         {
             EnsurePawnIoService(); // 装了 PawnIO 但服务未运行（如重启后）时拉起来；未装则跳过
-            computer.Open();
+            ct.ThrowIfCancellationRequested();
+            LhmComputerAccess.Run(computer, _ => Monitor(computer, ct), ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            try { Failed?.Invoke("传感器监控失败：" + ex.Message); } catch { /* 订阅方不影响清理 */ }
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _cpu = _gpu = null;
+                _cpuTemp = _cpuPower = _gpuTemp = _gpuPower = null;
+                _gpuOptions = [];
+                _gpuIndex = _pendingGpuIndex = -1;
+            }
+        }
+    }
 
+    static void Monitor(Computer computer, CancellationToken ct)
+    {
             // 全部带温度或功耗传感器的真实显卡（核显/独显都列，GPU 下拉框数据源）
             var gpus = computer.Hardware.Where(h =>
                 h.HardwareType is HardwareType.GpuAmd or HardwareType.GpuNvidia or HardwareType.GpuIntel &&
@@ -125,25 +165,12 @@ public static class SensorMonitorService
                 lock (_gate) { cpu = _cpu; gpu = _gpu; ct2 = _cpuTemp; cp = _cpuPower; gt = _gpuTemp; gp = _gpuPower; }
                 Update(cpu);
                 Update(gpu);
+                ct.ThrowIfCancellationRequested();
                 // 降级口径：null / ≤0 → 该路不可用（AMD CPU 无 PawnIO 时 LHM 常驻 0，物理上不可能是真值）
                 var reading = new Reading(Valid(ct2), Valid(cp), Valid(gt), Valid(gp));
                 try { Sampled?.Invoke(reading); } catch { /* 订阅方异常不炸轮询 */ }
                 ct.WaitHandle.WaitOne(2000); // 2 秒轮询（图表 120 秒窗口 = 60 个点）
             }
-        }
-        catch (OperationCanceledException) { /* 正常停止 */ }
-        catch { /* LHM 打开/读取失败：静默退出（页面保持占位文案） */ }
-        finally
-        {
-            lock (_gate)
-            {
-                _cpu = _gpu = null;
-                _cpuTemp = _cpuPower = _gpuTemp = _gpuPower = null;
-                _gpuOptions = [];
-                _gpuIndex = _pendingGpuIndex = -1;
-            }
-            try { computer.Close(); } catch { /* 关闭失败不影响 */ }
-        }
     }
 
     /// <summary>换绑 GPU 硬件与两路传感器引用并重新发 SensorsResolved（四行口径同步刷新）。loop 线程内调用。</summary>

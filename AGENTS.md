@@ -200,6 +200,16 @@ public interface IHostContext                       // 宿主注入 CreatePage
 
 ## 修改守则
 
+- 当前主线（2026-10-15）：简单 C# 服务整合 LHM 公开对象，配置核对复用现有报告模型；
+  BIOS、整机、主板、CPU、内存补充由用户确认全选。Windows 补充保留并标明来源。
+  `Plugins/LhmComputerAccess.cs` 由配置/散热两个工程链接，按进程内同名信号量串行管理
+  Computer 的完整打开/读取/关闭；等待可取消，原生调用仅在返回后协作取消。初始化/释放失败
+  记录进程故障，提示重启，不用反射清理上游私有资源。SDK 不承担 LHM 依赖。
+- `hardware-evidence/` 的旧 Java/Caller/契约作为历史保留，不再作为本任务开发主线，
+  尚未接入宿主 slnx、插件或安装链。原 `demo-args-v1` 不变，人工结果接口见
+  `hardware-evidence/contracts/result-demo-v1.md`；人工数据不得表示硬件通过。
+  不继续新增独立证据引擎、跨语言交接或 HTML 报告；清理另经用户确认。
+
 - 最小改动；新代码风格对齐周边（注释密度、命名、UserControl+code-behind、无第三方 UI 库）。
 - 改采集逻辑前先读 `项目交接文档.md` 第三节的坑（EDID/SMART/色域/LHM 降级矩阵都有实测结论）。
 - 试音曲署名（AvConference 页面）是用户给定原文，不得改动。
