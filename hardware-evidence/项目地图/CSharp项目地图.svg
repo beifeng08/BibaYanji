@@ -27,8 +27,8 @@
 <text class="h1" x="40" y="52">C# 项目地图</text>
 <text class="tm" x="40" y="72">笔吧验机 · C# 侧七层职责栈：接入宿主、建目录、采CPUID、启Java、收result、校验、展示、导出</text>
 <rect x="436" y="38" width="204" height="36" rx="8" fill="#E6F1FB" stroke="#85B7EB" stroke-width="0.5"/>
-<text class="tb" x="448" y="53">当前位置：F盘新二进制已冒烟</text>
-<text class="tb" x="448" y="68">等用户Java run · F盘dev</text>
+<text class="tb" x="448" y="53">当前位置：用户版联调 validated</text>
+<text class="tb" x="448" y="68">契约 demo-args-v1 · F盘dev</text>
 
 <circle cx="44" cy="87" r="3.5" fill="#1D9E75"/><text class="tm" x="52" y="91">已实跑</text>
 <circle cx="112" cy="87" r="3.5" fill="#185FA5"/><text class="tm" x="120" y="91">已确认/已认可</text>
@@ -124,12 +124,12 @@
 <rect class="bS" x="40" y="1084" width="600" height="104" rx="8"/>
 <text class="tx" x="52" y="1104">T1–T8 全过：真实Java联调3（含中文空格）· 负例2 · JVM错误1 · 替身2（标注）</text>
 <text class="tx" x="52" y="1122">契约 C1–C5 已实跑；超时实测 10.4 秒无残留进程；中文/空格路径逐项传参无损</text>
-<text class="tx" x="52" y="1140">2026-10-14：F盘新位置二进制复编译 0警告0错误 + 参考版Java冒烟 validated</text>
-<text class="tx" x="52" y="1158">边界：联调为参考版Java，用户 run 未写；F1（JVM级GBK乱码）为观察项，不改契约</text>
+<text class="tx" x="52" y="1140">2026-10-14：F盘复编译 0/0 + 参考版冒烟 validated + 用户版Java联调 validated</text>
+<text class="tx" x="52" y="1158">用户版：javac 0、javaExitCode=0、stdout三行、目录未写入；F1（JVM级GBK）观察项不改契约</text>
 
 <text class="h2" x="40" y="1212">04 下一步顺序（按价值）</text>
 <rect class="bP" x="40" y="1222" width="600" height="30" rx="8"/>
-<text class="tx" x="52" y="1241">1 用户版真实联调 —— 等 Java 线写完 run 并编译出 class，跑一次即得最关键证据</text>
+<text class="tx" x="52" y="1241">1 用户版真实联调 —— 已完成（2026-10-14 validated）；Java 侧负例 J3–J5 由 Java 线验收</text>
 <rect class="bP" x="40" y="1258" width="600" height="30" rx="8"/>
 <text class="tx" x="52" y="1277">2 人工 JSON 切片（L6）—— Java 写 result → C# 读校验；需新契约版本先对齐字段/规则/失败语义</text>
 <rect class="bP" x="40" y="1294" width="600" height="30" rx="8"/>
