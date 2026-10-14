@@ -67,13 +67,13 @@
 <text class="tx" x="52" y="418">ArgumentList 逐项原始参数，不额外套引号；启动后立即同时消费双管道（-jar/collect 未实跑）</text>
 
 <!-- L4 CPUID采集 -->
-<rect class="bA" x="40" y="444" width="600" height="88" rx="8"/>
-<text class="btA" x="52" y="462">L4 CPUID 采集 · 30 §10</text>
-<rect x="470" y="451" width="158" height="18" rx="9" fill="#FFFFFF" stroke="#BA7517" stroke-width="0.8"/>
-<text class="chip" x="549" y="464" text-anchor="middle" fill="#854F0B">沿用候选 · 未冻结</text>
+<rect class="bS" x="40" y="444" width="600" height="88" rx="8"/>
+<text class="btJ" x="52" y="462">L4 CPUID 采集 · 30 §10</text>
+<rect x="470" y="451" width="158" height="18" rx="9" fill="#FFFFFF" stroke="#1D9E75" stroke-width="0.8"/>
+<text class="chip" x="549" y="464" text-anchor="middle" fill="#0F6E56">候选B已冻结 · 探针实跑</text>
 <text class="tx" x="52" y="482">用 .NET X86Base.CpuId 采原始寄存器 → 写 cpuid.json（C# 写，Java 读）</text>
 <text class="tx" x="52" y="498">每寄存器六键 leaf/subleaf/eax/ebx/ecx/edx，8 位小写 hex 保 32 位位模式</text>
-<text class="tx" x="52" y="514">解码归属未定：候选A 交 Java 解码 ／ 候选B C# 自解码+交原证据（30 第241行）</text>
+<text class="tx" x="52" y="514">解码：候选B（2026-10-14 冻结）——C# 解码，交原证据+cpuid-decode-b-v1 规则</text>
 
 <!-- L3 任务控制 -->
 <rect class="bS" x="40" y="540" width="600" height="88" rx="8"/>
@@ -133,7 +133,7 @@
 <rect class="bP" x="40" y="1258" width="600" height="30" rx="8"/>
 <text class="tx" x="52" y="1277">2 人工 JSON 切片（L6）—— Java 写 result → C# 读校验；需新契约版本先对齐字段/规则/失败语义</text>
 <rect class="bP" x="40" y="1294" width="600" height="30" rx="8"/>
-<text class="tx" x="52" y="1313">3 CPUID 切片（L4）—— 先冻结解码归属：候选A（Java 解码）或候选B（C# 解码）</text>
+<text class="tx" x="52" y="1313">3 CPUID 切片（L4）—— 候选B 已冻结，探针采集+解码已实跑；JSON 形状待并入新契约</text>
 <rect class="bP" x="40" y="1330" width="600" height="30" rx="8"/>
 <text class="tx" x="52" y="1349">4 宿主接入（L1/L2/L3 全量）—— 取消/超时/切页/关闭保护、WPF 页面、证据与导出</text>
 <rect class="bP" x="40" y="1366" width="600" height="30" rx="8"/>
