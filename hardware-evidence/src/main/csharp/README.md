@@ -1,5 +1,8 @@
 # 独立 C# 调用方：demo-args-v1
 
+> 2026-10-14 更新：下文保留初次独立交付的历史状态，不能代表当前 SDK/构建情况。
+> 当前实际构建、原接口兼容调用、新结构化结果接口与验证入口见 [hardware-evidence README](../../../README.md) 和 [result-demo-v1](../../../contracts/result-demo-v1.md)。
+
 唯一业务依据是本目录未修改的 `CONTRACT.md`。本项目使用 .NET 10 标准库，无第三方 NuGet 依赖，不包含 Java 实现。本次交付是源码及静态审阅；尚未编译、运行或与真实 Java 联调。
 
 ## 本次验证状态

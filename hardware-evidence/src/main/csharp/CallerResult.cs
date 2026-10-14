@@ -10,7 +10,10 @@ public enum CallerStatus
     RequestInvalid,
     JavaFailure,
     CallerFailure,
-    Timeout
+    Timeout,
+    ResultReady,
+    ProtocolFailure,
+    Cancelled
 }
 
 public sealed class CallerResult
@@ -23,10 +26,19 @@ public sealed class CallerResult
     public string Stderr { get; internal set; } = string.Empty;
     public string? Error { get; internal set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ResultResponse? Response { get; internal set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool StdoutTruncated { get; internal set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool StderrTruncated { get; internal set; }
+
     [JsonIgnore]
     public int CallerExitCode => Status switch
     {
-        CallerStatus.Validated => 0,
+        CallerStatus.Validated or CallerStatus.ResultReady => 0,
         CallerStatus.RequestInvalid => 2,
         _ => 1
     };
@@ -34,10 +46,10 @@ public sealed class CallerResult
     internal void AddError(string message) =>
         Error = Error is null ? message : Error + Environment.NewLine + message;
 
-    // 超时后的停止/日志错误仍属于 timeout；自然结束后的日志错误属于 caller_failure。
+    // 超时/取消后的停止或日志错误保留原分类；自然结束后的日志错误属于 caller_failure。
     internal void AddCallerFailure(string message)
     {
-        if (Status != CallerStatus.Timeout)
+        if (Status is not (CallerStatus.Timeout or CallerStatus.Cancelled))
         {
             Status = CallerStatus.CallerFailure;
         }

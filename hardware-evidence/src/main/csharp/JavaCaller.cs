@@ -7,17 +7,30 @@ public static class JavaCaller
 {
     private static readonly TimeSpan NaturalExitLimit = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan CleanupLimit = TimeSpan.FromSeconds(3);
+    private const int MaxLogBytes = 1024 * 1024;
+    private sealed record CapturedLog(string Text, bool Truncated);
 
     // 功能：准备任务、启动 Java、采集日志并分类。背景：方法返回值不能代替 OS 进程退出码。
     // 方法：逐项传参，在等待前启动双管道异步读取；自然退出才保存 ExitCode。
-    public static async Task<CallerResult> RunAsync(string[] args)
+    public static Task<CallerResult> RunAsync(string[] args) => RunCoreAsync(args, false, CancellationToken.None);
+
+    public static Task<CallerResult> RunResultAsync(string[] args, CancellationToken cancellationToken = default) =>
+        RunCoreAsync(args, true, cancellationToken);
+
+    private static async Task<CallerResult> RunCoreAsync(string[] args, bool resultDemo, CancellationToken cancellationToken)
     {
         var result = new CallerResult();
         CallerConfiguration configuration;
         try
         {
-            configuration = CallerConfiguration.FromArguments(args);
-            (result.ExecutionId, result.TaskDirectory) = configuration.CreateTaskDirectory();
+            cancellationToken.ThrowIfCancellationRequested();
+            configuration = CallerConfiguration.FromArguments(args, resultDemo);
+            (result.ExecutionId, result.TaskDirectory) = configuration.CreateTaskDirectory(exclusive: resultDemo);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            MarkCancelled(result);
+            return result;
         }
         catch (Exception exception)
         {
@@ -27,14 +40,15 @@ public static class JavaCaller
 
         using var process = new Process();
         using var readCancellation = new CancellationTokenSource();
-        Task<string>? stdoutTask = null;
-        Task<string>? stderrTask = null;
+        Task<CapturedLog>? stdoutTask = null;
+        Task<CapturedLog>? stderrTask = null;
         bool started = false;
         bool naturalExitObserved = false;
 
         try
         {
-            process.StartInfo = CreateStartInfo(configuration, result.ExecutionId!, result.TaskDirectory!);
+            cancellationToken.ThrowIfCancellationRequested();
+            process.StartInfo = CreateStartInfo(configuration, result.ExecutionId!, result.TaskDirectory!, resultDemo);
             if (!process.Start())
             {
                 throw new InvalidOperationException("Process.Start 未成功创建本次子进程。");
@@ -42,14 +56,14 @@ public static class JavaCaller
 
             started = true;
             var elapsed = Stopwatch.StartNew();
-            stdoutTask = process.StandardOutput.ReadToEndAsync(readCancellation.Token);
+            stdoutTask = ReadLogAsync(process.StandardOutput, resultDemo, readCancellation.Token);
             ObserveLateFault(stdoutTask);
-            stderrTask = process.StandardError.ReadToEndAsync(readCancellation.Token);
+            stderrTask = ReadLogAsync(process.StandardError, resultDemo, readCancellation.Token);
             ObserveLateFault(stderrTask);
 
             // 从启动后计时；读取的启动开销也计入十秒自然结束期限。
             TimeSpan remaining = NaturalExitLimit - elapsed.Elapsed;
-            using var exitCancellation = new CancellationTokenSource();
+            using var exitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             if (remaining <= TimeSpan.Zero)
             {
                 exitCancellation.Cancel();
@@ -73,10 +87,21 @@ public static class JavaCaller
             }
             catch (OperationCanceledException) when (exitCancellation.IsCancellationRequested)
             {
-                result.Status = CallerStatus.Timeout;
-                result.JavaExitCode = null;
-                result.AddError("Java 未在启动后的 10 秒期限内自然结束；超时收尾退出码不作为 Java 自然退出码。");
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    MarkCancelled(result);
+                }
+                else
+                {
+                    result.Status = CallerStatus.Timeout;
+                    result.JavaExitCode = null;
+                    result.AddError("Java 未在启动后的 10 秒期限内自然结束；超时收尾退出码不作为 Java 自然退出码。");
+                }
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            MarkCancelled(result);
         }
         catch (Exception exception)
         {
@@ -89,11 +114,22 @@ public static class JavaCaller
         }
 
         await CollectLogsAsync(process, stdoutTask, stderrTask, readCancellation, result);
+        if (resultDemo && result.Status != CallerStatus.Timeout)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                MarkCancelled(result);
+            }
+            else if (result.Status is CallerStatus.Validated or CallerStatus.RequestInvalid)
+            {
+                await ReceiveResultAsync(result, cancellationToken);
+            }
+        }
         return result;
     }
 
     private static ProcessStartInfo CreateStartInfo(
-        CallerConfiguration configuration, string executionId, string taskDirectory)
+        CallerConfiguration configuration, string executionId, string taskDirectory, bool resultDemo)
     {
         var info = new ProcessStartInfo
         {
@@ -108,9 +144,11 @@ public static class JavaCaller
         };
 
         info.ArgumentList.Add("-cp");
-        info.ArgumentList.Add(configuration.ClassDirectory);
-        info.ArgumentList.Add("DemoCommand");
-        info.ArgumentList.Add("demo");
+        info.ArgumentList.Add(resultDemo
+            ? configuration.ClassDirectory + Path.PathSeparator + Path.Combine(configuration.ClassDirectory, "lib", "*")
+            : configuration.ClassDirectory);
+        info.ArgumentList.Add(resultDemo ? "cn.bibapcs.evidence.cli.ResultCommand" : "DemoCommand");
+        info.ArgumentList.Add(resultDemo ? "result-demo" : "demo");
         info.ArgumentList.Add("--execution-id");
         info.ArgumentList.Add(executionId);
         info.ArgumentList.Add("--out");
@@ -157,12 +195,12 @@ public static class JavaCaller
     // 方法：两路共同最多等待三秒；超限取消并关闭读端，保留已完整取得的一路。
     private static async Task CollectLogsAsync(
         Process process,
-        Task<string>? stdoutTask,
-        Task<string>? stderrTask,
+        Task<CapturedLog>? stdoutTask,
+        Task<CapturedLog>? stderrTask,
         CancellationTokenSource readCancellation,
         CallerResult result)
     {
-        var tasks = new List<Task<string>>(2);
+        var tasks = new List<Task<CapturedLog>>(2);
         if (stdoutTask is not null)
         {
             tasks.Add(stdoutTask);
@@ -178,7 +216,7 @@ public static class JavaCaller
             return;
         }
 
-        Task<string[]> allLogs = Task.WhenAll(tasks);
+        Task<CapturedLog[]> allLogs = Task.WhenAll(tasks);
         ObserveLateFault(allLogs);
         try
         {
@@ -204,15 +242,19 @@ public static class JavaCaller
             result.AddCallerFailure(Describe("日志读取失败，日志可能不完整", exception));
         }
 
-        result.Stdout = CompletedLog(stdoutTask, "stdout", result);
-        result.Stderr = CompletedLog(stderrTask, "stderr", result);
+        CapturedLog stdout = CompletedLog(stdoutTask, "stdout", result);
+        CapturedLog stderr = CompletedLog(stderrTask, "stderr", result);
+        result.Stdout = stdout.Text;
+        result.Stderr = stderr.Text;
+        result.StdoutTruncated = stdout.Truncated;
+        result.StderrTruncated = stderr.Truncated;
     }
 
-    private static string CompletedLog(Task<string>? task, string label, CallerResult result)
+    private static CapturedLog CompletedLog(Task<CapturedLog>? task, string label, CallerResult result)
     {
         if (task is null)
         {
-            return string.Empty;
+            return new(string.Empty, false);
         }
 
         if (task.IsCompletedSuccessfully)
@@ -233,7 +275,71 @@ public static class JavaCaller
             result.AddCallerFailure($"{label} 读取尚未结束；返回空文本，后续异常由观察器消费。");
         }
 
-        return string.Empty;
+        return new(string.Empty, false);
+    }
+
+    // 功能：限制保存量但持续消费管道。背景：截断前无限读取会消耗无界内存。
+    // 方法：新接口按原始字节保留每路 1 MiB，原演示保留其原有限日志行为。
+    private static async Task<CapturedLog> ReadLogAsync(StreamReader reader, bool bounded, CancellationToken token)
+    {
+        if (!bounded)
+        {
+            return new(await reader.ReadToEndAsync(token), false);
+        }
+
+        using var saved = new MemoryStream();
+        var buffer = new byte[8192];
+        bool truncated = false;
+        int count;
+        while ((count = await reader.BaseStream.ReadAsync(buffer, token)) != 0)
+        {
+            int keep = Math.Min(count, MaxLogBytes - (int)saved.Length);
+            saved.Write(buffer, 0, keep);
+            truncated |= keep != count;
+        }
+
+        return new(Encoding.UTF8.GetString(saved.GetBuffer(), 0, (int)saved.Length), truncated);
+    }
+
+    private static async Task ReceiveResultAsync(CallerResult result, CancellationToken token)
+    {
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            if (result.Status == CallerStatus.RequestInvalid
+                && !File.Exists(Path.Combine(result.TaskDirectory!, "result.json")))
+            {
+                return;
+            }
+
+            ResultResponse response = await ResultResponseReader.ReadAsync(
+                result.TaskDirectory!, result.ExecutionId!, result.JavaExitCode!.Value, token);
+            token.ThrowIfCancellationRequested();
+            result.Response = response;
+            result.Status = response.ExecutionStatus == "completed" ? CallerStatus.ResultReady : CallerStatus.RequestInvalid;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            MarkCancelled(result);
+        }
+        catch (Exception exception)
+        {
+            result.Response = null;
+            result.Status = CallerStatus.ProtocolFailure;
+            result.AddError(Describe("结果校验失败", exception));
+        }
+    }
+
+    private static void MarkCancelled(CallerResult result)
+    {
+        bool alreadyCancelled = result.Status == CallerStatus.Cancelled;
+        result.Status = CallerStatus.Cancelled;
+        result.JavaExitCode = null;
+        result.Response = null;
+        if (!alreadyCancelled)
+        {
+            result.AddError("本次任务已取消；不接收结果，收尾退出码不作为自然退出码。");
+        }
     }
 
     private static void CloseReader(Process process, bool isStdout, CallerResult result)
