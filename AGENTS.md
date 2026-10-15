@@ -198,6 +198,14 @@ public interface IHostContext                       // 宿主注入 CreatePage
   `Tools\pawnio\PawnIO_setup.exe -install -silent` 静默完成、用户零点击——只传 `-install` 会弹版权确认窗；
   未装散热组件或系统已装 PawnIO 时 Check 自动跳过，后者避免其「请先卸载」阻塞弹窗）。
 
+## 本地预览封装与验收（2026-10-15）
+
+- `installer/build-release.ps1` 将 FurMark→宿主/六插件自包含发布到新目录，核对六插件与关键原生负载，再调用 Inno 生成预览 EXE、ZIP、SHA256。要求干净提交；脚本受执行策略阻止时不修改策略，改用其中的原生命令，并明示脚本仅静态校验。
+- `installer/setup.iss` 支持 `Preview`、`PackageVersion`、`PackageFileVersion`、`PublishSource` 预处理参数；预览 AppId/安装目录/快捷方式独立，卸载保留用户数据。
+- 预览负载含 `preview-mode` 标记；宿主设置及插件待处理队列改用 `%APPDATA%/YanJiPreview`，正式版继续 `%APPDATA%/YanJi`。硬盘跑分结果仍共享，不能宣称所有数据完全隔离。
+- `installer/VerifyRelease.csproj` 是独立自包含验收程序，不加入产品解决方案；以 `PayloadDir` 指向待验目录，驱动真实 MainWindow、插件加载和采集。先要求 PawnIO 已运行，不安装/启动驱动，不启动烤机。图表对照最新真实样本，检查切页/重启/关闭；另跑产品 EXE 入口冒烟。
+- 用户负责电池异常场景；本地验收包不等于公开发行，驱动重装、全新系统和满载烤机未自动纳入验收。
+
 ## 修改守则
 
 - 当前主线（2026-10-15）：简单 C# 服务整合 LHM 公开对象，配置核对复用现有报告模型；

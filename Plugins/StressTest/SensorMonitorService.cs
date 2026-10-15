@@ -269,6 +269,17 @@ public static class SensorMonitorService
         if (!IsPawnIoInstalled()) return;
         try
         {
+            // 服务已运行时不重复发启动命令，避免每次切回页面都请求服务控制权限。
+            using var searcher = new System.Management.ManagementObjectSearcher(
+                "SELECT State FROM Win32_SystemDriver WHERE Name='PawnIO'");
+            using var drivers = searcher.Get();
+            foreach (System.Management.ManagementObject driver in drivers)
+            {
+                using (driver)
+                    if (string.Equals(driver["State"] as string, "Running", StringComparison.OrdinalIgnoreCase))
+                        return;
+            }
+
             using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "sc.exe",
@@ -280,7 +291,11 @@ public static class SensorMonitorService
             })!;
             p.WaitForExit(15_000);
         }
-        catch { /* 拉不起来就算了：传感器按不可用降级 */ }
+        catch
+        {
+            // 状态查询失败时不盲发服务控制命令；保留诊断，已有可用传感器继续工作。
+            try { Failed?.Invoke("无法确认或启动 PawnIO 服务；传感器将按实际可用状态显示。"); } catch { }
+        }
     }
 
     static void Update(IHardware? hw)
