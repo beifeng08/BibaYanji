@@ -203,7 +203,7 @@ public interface IHostContext                       // 宿主注入 CreatePage
 - `installer/build-release.ps1` 将 FurMark→宿主/六插件自包含发布到新目录，核对六插件与关键原生负载，再调用 Inno 生成预览 EXE、ZIP、SHA256。要求干净提交；脚本受执行策略阻止时不修改策略，改用其中的原生命令，并明示脚本仅静态校验。
 - `installer/setup.iss` 支持 `Preview`、`PackageVersion`、`PackageFileVersion`、`PublishSource` 预处理参数；预览 AppId/安装目录/快捷方式独立，卸载保留用户数据。
 - 预览负载含 `preview-mode` 标记；宿主设置及插件待处理队列改用 `%APPDATA%/YanJiPreview`，正式版继续 `%APPDATA%/YanJi`。硬盘跑分结果仍共享，不能宣称所有数据完全隔离。
-- `installer/VerifyRelease.csproj` 是独立自包含验收程序，不加入产品解决方案；以 `PayloadDir` 指向待验目录，驱动真实 MainWindow、插件加载和采集。先要求 PawnIO 已运行，不安装/启动驱动，不启动烤机。图表对照最新真实样本，检查切页/重启/关闭；另跑产品 EXE 入口冒烟。
+- `installer/VerifyRelease.csproj` 是独立自包含验收程序，不加入产品解决方案；以 `PayloadDir` 指向待验目录，驱动真实 MainWindow、插件加载和采集。先要求 PawnIO 已运行，并将 `AllowAutomaticDriverStart=false`，不安装/启动驱动，不启动烤机。图表对照最新真实样本，检查切页/重启/关闭；另跑产品 EXE 入口冒烟。可加 `--soak-seconds 10800` 做三小时持续监控，逐次落盘 samples.ndjson，每10秒记录进程资源、每5分钟输出进度，采样中断超过30秒即失败；仍不能识别上游未抛异常的旧传感器值。
 - 用户负责电池异常场景；本地验收包不等于公开发行，驱动重装、全新系统和满载烤机未自动纳入验收。
 
 ## 修改守则

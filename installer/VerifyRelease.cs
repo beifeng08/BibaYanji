@@ -23,6 +23,10 @@ internal static class VerifyRelease
     static string Output = "";
     static int ExitCode;
     static SensorMonitorService.SensorMap? LastMap;
+    static readonly Stopwatch Runtime = Stopwatch.StartNew();
+    static readonly ConcurrentQueue<double> SampleTimes = new();
+    static readonly List<object> ResourceSamples = [];
+    static int SoakSeconds;
     static void Check(string name, bool passed, object? detail = null)
     {
         Checks.Add(new { name, passed, detail });
@@ -32,9 +36,11 @@ internal static class VerifyRelease
     [STAThread]
     static int Main(string[] args)
     {
-        if (args.Length != 1) { Console.Error.WriteLine("Usage: VerifyRelease <existing-output-directory>"); return 2; }
+        if (args.Length is not (1 or 3)) { Console.Error.WriteLine("Usage: VerifyRelease <existing-output-directory> [--soak-seconds <60..21600>]"); return 2; }
+        if (args.Length == 3 && (args[1] != "--soak-seconds" || !int.TryParse(args[2], out SoakSeconds) || SoakSeconds is < 60 or > 21600)) return 2;
         Output = Path.GetFullPath(args[0]);
         if (!Directory.Exists(Output)) return 2;
+        using var rawSamples = new StreamWriter(Path.Combine(Output, "samples.ndjson")) { AutoFlush = true };
         // Do not start/install a driver in this acceptance run.
         using (var query = new ManagementObjectSearcher("SELECT State FROM Win32_SystemDriver WHERE Name='PawnIO'"))
         using (var rows = query.Get())
@@ -44,16 +50,26 @@ internal static class VerifyRelease
                 using (row) running |= string.Equals(row["State"] as string, "Running", StringComparison.OrdinalIgnoreCase);
             if (!running) { Console.Error.WriteLine("PawnIO must already be running; no service action performed."); return 3; }
         }
+        SensorMonitorService.AllowAutomaticDriverStart = false;
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         ApplyTheme("Light");
         app.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("/验机软件;component/Themes/Controls.xaml", UriKind.Relative) });
         app.DispatcherUnhandledException += (_, e) => { Failures.Enqueue(e.Exception.ToString()); e.Handled = true; };
-        SensorMonitorService.Sampled += Readings.Enqueue;
+        SensorMonitorService.Sampled += reading =>
+        {
+            double seconds = Runtime.Elapsed.TotalSeconds;
+            Readings.Enqueue(reading);
+            SampleTimes.Enqueue(seconds);
+            rawSamples.WriteLine(JsonSerializer.Serialize(new { elapsedSeconds = seconds, reading }));
+        };
         SensorMonitorService.SensorsResolved += map => LastMap = map;
         SensorMonitorService.Failed += Failures.Enqueue;
         Window = new MainWindow { IsHitTestVisible = false, ShowActivated = false };
+        bool started = false;
         Window.Loaded += async (_, _) =>
         {
+            if (started) return;
+            started = true;
             try { await Run(); }
             catch (Exception ex) { ExitCode = 1; Checks.Add(new { name = "exception", passed = false, detail = ex.ToString() }); Console.Error.WriteLine(ex); }
             finally
@@ -62,11 +78,14 @@ internal static class VerifyRelease
                 try { await Until(() => !SensorMonitorService.IsRunning, 90); }
                 catch (Exception ex) { ExitCode = 1; Failures.Enqueue(ex.ToString()); }
                 var samples = Readings.ToArray();
+                if (SoakSeconds > 0) File.WriteAllText(Path.Combine(Output, "soak-progress.json"), JsonSerializer.Serialize(new
+                { status = ExitCode == 0 ? "completed" : "failed", requestedSeconds = SoakSeconds, totalElapsedSeconds = Runtime.Elapsed.TotalSeconds, sampleCount = samples.Length, exitCode = ExitCode }));
                 File.WriteAllText(Path.Combine(Output, "real-monitor-verification.json"), JsonSerializer.Serialize(new
                 {
                     date = DateTimeOffset.Now, mode = "real-release-MainWindow-real-hardware-no-stress-load",
                     driver = "already-running-PawnIO", exitCode = ExitCode, checks = Checks,
-                    failures = Failures.ToArray(), sampleCount = samples.Length,
+                    requestedSoakSeconds = SoakSeconds, totalElapsedSeconds = Runtime.Elapsed.TotalSeconds,
+                    failures = Failures.ToArray(), sampleCount = samples.Length, resources = ResourceSamples,
                     stats = new { cpuTemperature = Stats(samples.Select(x => x.CpuTemp)), cpuPower = Stats(samples.Select(x => x.CpuPower)),
                         gpuTemperature = Stats(samples.Select(x => x.GpuTemp)), gpuPower = Stats(samples.Select(x => x.GpuPower)) },
                     limitations = new[] { "Battery failure scenarios belong to user acceptance.", "No driver install/start or stress workload performed.", "Probe creates shipped MainWindow; separate executable smoke verifies process entry." }
@@ -80,8 +99,64 @@ internal static class VerifyRelease
     static object Stats(IEnumerable<double?> source)
     {
         var values = source.Where(x => x.HasValue).Select(x => x!.Value).ToArray();
+        double? mean = values.Length > 0 ? values.Average() : null;
         return new { count = values.Length, min = values.Length > 0 ? (double?)values.Min() : null,
-            max = values.Length > 0 ? (double?)values.Max() : null, mean = values.Length > 0 ? (double?)values.Average() : null };
+            max = values.Length > 0 ? (double?)values.Max() : null, mean,
+            median = values.Length > 0 ? (double?)Median(values) : null,
+            populationVariance = mean is double average ? (double?)values.Select(v => Math.Pow(v - average, 2)).Average() : null,
+            distinctValues = values.Distinct().Count() };
+    }
+    static double Median(double[] values)
+    {
+        var ordered = values.Order().ToArray();
+        return ordered.Length % 2 == 0 ? (ordered[ordered.Length / 2 - 1] + ordered[ordered.Length / 2]) / 2 : ordered[ordered.Length / 2];
+    }
+    static async Task Soak()
+    {
+        Nav("stress");
+        int initial = Readings.Count;
+        await Until(() => Readings.Count >= initial + 2);
+        var timer = Stopwatch.StartNew();
+        int startingCount = Readings.Count;
+        int startingTimeCount = SampleTimes.Count;
+        using var process = Process.GetCurrentProcess();
+        var previousCpu = process.TotalProcessorTime;
+        double previousSeconds = 0;
+        int checkpoint = 0;
+        while (timer.Elapsed.TotalSeconds < SoakSeconds)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.1, Math.Min(10, SoakSeconds - timer.Elapsed.TotalSeconds))));
+            process.Refresh();
+            var cpu = process.TotalProcessorTime;
+            double seconds = timer.Elapsed.TotalSeconds;
+            var resource = new { elapsedSeconds = seconds, samples = Readings.Count,
+                workingSetBytes = process.WorkingSet64, privateBytes = process.PrivateMemorySize64,
+                handles = process.HandleCount, threads = process.Threads.Count,
+                cpuPercentOfMachine = (cpu - previousCpu).TotalSeconds / (seconds - previousSeconds) / Environment.ProcessorCount * 100 };
+            ResourceSamples.Add(resource);
+            previousCpu = cpu; previousSeconds = seconds;
+            if (!Failures.IsEmpty) throw new InvalidOperationException(string.Join("\n", Failures));
+            if (!SensorMonitorService.IsRunning || SampleTimes.IsEmpty || Runtime.Elapsed.TotalSeconds - SampleTimes.Last() > 30)
+                throw new InvalidOperationException("No recent monitor sample within 30 seconds");
+            if (StressTestService.IsRunning) throw new InvalidOperationException("Unexpected stress workload");
+            if ((int)(seconds / 300) > checkpoint)
+            {
+                checkpoint = (int)(seconds / 300);
+                Console.WriteLine($"SOAK {seconds:F0}s samples={Readings.Count} privateMiB={process.PrivateMemorySize64 / 1048576.0:F1}");
+            }
+            File.WriteAllText(Path.Combine(Output, "soak-progress.json"), JsonSerializer.Serialize(new
+            {
+                status = "running", requestedSeconds = SoakSeconds, elapsedSeconds = seconds,
+                sampleCount = Readings.Count, lastSampleAgeSeconds = Runtime.Elapsed.TotalSeconds - SampleTimes.Last(), resource
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        var times = SampleTimes.Skip(startingTimeCount).ToArray();
+        double maxGap = times.Length > 1 ? times.Zip(times.Skip(1), (a, b) => b - a).Max() : double.PositiveInfinity;
+        Check("soak requested wall duration reached", timer.Elapsed.TotalSeconds >= SoakSeconds, timer.Elapsed.TotalSeconds);
+        Check("soak periodic samples sustained", Readings.Count - startingCount >= SoakSeconds / 5, Readings.Count - startingCount);
+        Check("soak no sampling gap over 30 seconds", maxGap <= 30, maxGap);
+        Check("soak no dispatcher or monitor failures", Failures.IsEmpty);
+        Capture("soak-final.png");
     }
     static async Task Until(Func<bool> condition, int seconds = 120)
     {
@@ -194,6 +269,7 @@ internal static class VerifyRelease
         int explicitRestart = Readings.Count;
         await Until(() => SensorMonitorService.SessionToken != previousSession && !SensorMonitorService.SessionToken.IsCancellationRequested && Readings.Count >= explicitRestart + 2, 120);
         Check("explicit stop/start replaces session and resumes real sampling", previousSession.IsCancellationRequested);
+        if (SoakSeconds > 0) await Soak();
         Window.Close();
         await Until(() => !SensorMonitorService.IsRunning, 120);
         int closed = Readings.Count;

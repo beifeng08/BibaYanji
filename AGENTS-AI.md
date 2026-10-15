@@ -24,7 +24,7 @@
 - 用户确认第1项真实监控与第3项本地安装/打包验收，完成后提交推送并更新 PR；第2项电池异常由用户处理。满载烤机、驱动卸载重装、公开发布、合并均不在本轮范围。
 - PawnIO已运行时先查状态，避免每次进监控页重复请求启动；查询失败则沿用不可用降级，未借助替代命令绕过服务启动限制。
 - 预览版独立 AppId/安装目录；负载 `preview-mode` 使设置与插件待处理队列使用 `YanJiPreview`。硬盘成绩仍沿用共享目录，卸载预览始终保留用户数据。
-- 封装入口与真实验收工程在 `installer/build-release.ps1`、`VerifyRelease.csproj`；具体运行限制和证据见 PR。产物不进 Git。
+- 封装入口与真实验收工程在 `installer/build-release.ps1`、`VerifyRelease.csproj`；具体运行限制和证据见 PR。产物不进 Git。验收入口禁用 `AllowAutomaticDriverStart`，可用 `--soak-seconds 10800` 持续低负载监控并记录原始样本/进程资源；短跑不算三小时通过。
 
 ## 历史两种语言的开发分工（已停止推进）
 

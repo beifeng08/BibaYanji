@@ -153,7 +153,7 @@ var
   Lbl: TNewStaticText;
 begin
 #ifdef Preview
-  { 预览版与正式版共用现有用户配置；预览卸载始终保留它，不显示删除选项。 }
+  { 预览版设置与插件队列独立，硬盘成绩仍共享；卸载始终保留用户数据。 }
   DeleteUserData := False;
   Result := True;
   Exit;

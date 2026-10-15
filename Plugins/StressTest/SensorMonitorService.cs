@@ -221,6 +221,9 @@ public static class SensorMonitorService
 
     public static bool HasInstaller => File.Exists(InstallerExe);
 
+    /// <summary>验收入口可禁用自动服务启动，仅使用已经运行的驱动；正常产品行为保持不变。</summary>
+    public static bool AllowAutomaticDriverStart { get; set; } = true;
+
     /// <summary>PawnIO 是否已安装（直接查注册表卸载项——LHM 的 PawnIo.IsInstalled 是静态缓存，
     /// 进程内首次访问后不再刷新，装完驱动想即时判断必须自己查注册表）。</summary>
     public static bool IsPawnIoInstalled()
@@ -280,6 +283,11 @@ public static class SensorMonitorService
                         return;
             }
 
+            if (!AllowAutomaticDriverStart)
+            {
+                Failed?.Invoke("PawnIO 未运行，当前验收模式禁止启动驱动服务。");
+                return;
+            }
             using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "sc.exe",
