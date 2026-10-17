@@ -22,7 +22,7 @@ public class StressTestPlugin : IYanJiPlugin, IPluginShutdown
     public UserControl CreatePage(IHostContext host) => new StressTestPage();
     public void Shutdown()
     {
-        StressTestService.Stop();
-        SensorMonitorService.Stop();
+        try { StressTestService.Stop(); }
+        finally { SensorMonitorService.Stop(); }
     }
 }

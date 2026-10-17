@@ -32,9 +32,15 @@
   #define PublishSource "..\publish"
 #endif
 #ifdef Preview
-  #define ProductName "笔吧验机预览版"
-  #define ProductDirectory "BibaInspectionPreview"
-  #define ProductId "BibaInspection.Preview"
+  #ifdef MeetingPreview
+    #define ProductName "笔吧验机会议预览版"
+    #define ProductDirectory "BibaInspectionMeetingPreview"
+    #define ProductId "BibaInspection.MeetingPreview"
+  #else
+    #define ProductName "笔吧验机预览版"
+    #define ProductDirectory "BibaInspectionPreview"
+    #define ProductId "BibaInspection.Preview"
+  #endif
 #else
   #define ProductName "笔吧验机"
   #define ProductDirectory "BibaInspection"
@@ -92,7 +98,12 @@ Name: "disk"; Description: "硬盘跑分（CrystalDiskMark 源码集成，SEQ1M/
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
 Name: "startmenu"; Description: "创建开始菜单项"; GroupDescription: "附加任务："
+#ifdef Preview
+; 预览版只在用户主动选择后才安装内核驱动，默认不执行。
+Name: "pawnio"; Description: "安装 PawnIO 内核驱动（可选；请先确认需要修改系统驱动）"; GroupDescription: "附加任务："; Flags: unchecked
+#else
 Name: "pawnio"; Description: "安装 PawnIO 内核驱动（CPU/主板传感器需要；官方签名安装器，静默安装无需重启）"; GroupDescription: "附加任务："
+#endif
 
 [Files]
 ; 主程序：除 plugins\ 与 Tools\ 外的全部内容（exe + 运行时 + PluginSdk + 依赖）。

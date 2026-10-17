@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using LibreHardwareMonitor.Hardware;
 using YanJi.Hardware;
@@ -23,6 +24,9 @@ public static class SensorMonitorService
     /// <summary>一张可选显卡（Index = LHM 枚举序，Name = 硬件名）。</summary>
     public record GpuOption(int Index, string Name);
 
+    /// <summary>新会话已开始（后台线程，页面清空上一轮状态后等待新读数）。</summary>
+    public static event Action? SessionStarted;
+
     /// <summary>新读数（后台线程触发，订阅方需自行封送 UI 线程）。</summary>
     public static event Action<Reading>? Sampled;
 
@@ -37,6 +41,7 @@ public static class SensorMonitorService
 
     static readonly object _gate = new();
     static CancellationTokenSource? _cts;
+    static CancellationToken _sessionToken = new(true);
     static Task? _loop;
     static bool _requested;
     public static event Action<string>? Failed;
@@ -48,8 +53,8 @@ public static class SensorMonitorService
     static int _pendingGpuIndex = -1; // 页面请求换绑的目标索引（loop 下轮应用）
 
     public static bool IsRunning { get { lock (_gate) return _loop != null; } }
-    // 页面入队时捕获当前轮次，Stop 后连同已入队的 UI 回调一起作废。
-    public static CancellationToken SessionToken { get { lock (_gate) return _cts?.Token ?? new CancellationToken(true); } }
+    // 保留最近会话的身份：取消使普通回调失效，失败提示仍可辨认本轮，直到下一轮替换。
+    public static CancellationToken SessionToken { get { lock (_gate) return _sessionToken; } }
 
     /// <summary>开始轮询（幂等：已在跑则直接返回）。Computer.Open 较慢，全程后台线程。</summary>
     public static void Start()
@@ -67,16 +72,23 @@ public static class SensorMonitorService
     {
         var source = new CancellationTokenSource();
         _cts = source;
-        var loop = Task.Run(() => Loop(source.Token));
+        var token = _sessionToken = source.Token;
+        var loop = Task.Run(() => Loop(token));
         _loop = loop;
         _ = loop.ContinueWith(_ =>
         {
             lock (_gate)
             {
+                // 必须在退出取消之前保留判定：异常/正常结束不能因此变成自动重试。
                 bool restart = _requested && source.IsCancellationRequested;
-                _loop = null;
-                _cts = null;
-                source.Dispose();
+                try { source.Cancel(); }
+                catch (Exception ex) { Trace.WriteLine("传感器会话取消回调失败：" + ex); }
+                finally
+                {
+                    _loop = null;
+                    _cts = null;
+                    source.Dispose();
+                }
                 if (restart) StartLoop();
             }
         }, TaskScheduler.Default);
@@ -103,7 +115,17 @@ public static class SensorMonitorService
             _pendingGpuIndex = index;
             _gpuIndex = index;
         }
-        GpuChanging?.Invoke();
+        Notify(GpuChanging, handler => handler(), nameof(GpuChanging));
+    }
+
+    static void Notify<T>(T? handlers, Action<T> invoke, string eventName) where T : Delegate
+    {
+        if (handlers == null) return;
+        foreach (T handler in handlers.GetInvocationList())
+        {
+            try { invoke(handler); }
+            catch (Exception ex) { Trace.WriteLine($"传感器监控 {eventName} 订阅回调失败：{ex}"); }
+        }
     }
 
     static void Loop(CancellationToken ct)
@@ -111,6 +133,8 @@ public static class SensorMonitorService
         var computer = new Computer { IsCpuEnabled = true, IsGpuEnabled = true };
         try
         {
+            ct.ThrowIfCancellationRequested();
+            Notify(SessionStarted, handler => handler(), nameof(SessionStarted));
             EnsurePawnIoService(); // 装了 PawnIO 但服务未运行（如重启后）时拉起来；未装则跳过
             ct.ThrowIfCancellationRequested();
             LhmComputerAccess.Run(computer, _ => Monitor(computer, ct), ct);
@@ -118,7 +142,7 @@ public static class SensorMonitorService
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            try { Failed?.Invoke("传感器监控失败：" + ex.Message); } catch { /* 订阅方不影响清理 */ }
+            Notify(Failed, handler => handler("传感器监控失败：" + ex.Message), nameof(Failed));
         }
         finally
         {
@@ -150,7 +174,7 @@ public static class SensorMonitorService
                     gpus.Select(h => (h.HardwareType, h.Name)).ToList());
             }
             ApplyGpu(gpus.Count > 0 ? gpus[defaultIndex] : null);
-            GpuListReady?.Invoke(options, defaultIndex);
+            Notify(GpuListReady, handler => handler(options, defaultIndex), nameof(GpuListReady));
 
             while (!ct.IsCancellationRequested)
             {
@@ -163,12 +187,14 @@ public static class SensorMonitorService
                 IHardware? cpu, gpu;
                 ISensor? ct2, cp, gt, gp;
                 lock (_gate) { cpu = _cpu; gpu = _gpu; ct2 = _cpuTemp; cp = _cpuPower; gt = _gpuTemp; gp = _gpuPower; }
-                Update(cpu);
-                Update(gpu);
+                bool cpuUpdated = Update(cpu);
+                bool gpuUpdated = Update(gpu);
                 ct.ThrowIfCancellationRequested();
-                // 降级口径：null / ≤0 → 该路不可用（AMD CPU 无 PawnIO 时 LHM 常驻 0，物理上不可能是真值）
-                var reading = new Reading(Valid(ct2), Valid(cp), Valid(gt), Valid(gp));
-                try { Sampled?.Invoke(reading); } catch { /* 订阅方异常不炸轮询 */ }
+                // 更新失败只降级对应硬件，不复用上一轮的正数；非有限值 / null / ≤0 也视为不可用。
+                var reading = new Reading(
+                    cpuUpdated ? Valid(ct2) : null, cpuUpdated ? Valid(cp) : null,
+                    gpuUpdated ? Valid(gt) : null, gpuUpdated ? Valid(gp) : null);
+                Notify(Sampled, handler => handler(reading), nameof(Sampled));
                 ct.WaitHandle.WaitOne(2000); // 2 秒轮询（图表 120 秒窗口 = 60 个点）
             }
     }
@@ -189,7 +215,8 @@ public static class SensorMonitorService
             ct = _cpuTemp;
             cp = _cpuPower;
         }
-        SensorsResolved?.Invoke(new SensorMap(cpuName, ct?.Name, cp?.Name, gt?.Name, gp?.Name, gpu?.Name));
+        var map = new SensorMap(cpuName, ct?.Name, cp?.Name, gt?.Name, gp?.Name, gpu?.Name);
+        Notify(SensorsResolved, handler => handler(map), nameof(SensorsResolved));
     }
 
     /// <summary>独显启发式（口径与交接文档一致）：
@@ -285,7 +312,7 @@ public static class SensorMonitorService
 
             if (!AllowAutomaticDriverStart)
             {
-                Failed?.Invoke("PawnIO 未运行，当前验收模式禁止启动驱动服务。");
+                Notify(Failed, handler => handler("PawnIO 未运行，当前验收模式禁止启动驱动服务。"), nameof(Failed));
                 return;
             }
             using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
@@ -302,18 +329,23 @@ public static class SensorMonitorService
         catch
         {
             // 状态查询失败时不盲发服务控制命令；保留诊断，已有可用传感器继续工作。
-            try { Failed?.Invoke("无法确认或启动 PawnIO 服务；传感器将按实际可用状态显示。"); } catch { }
+            Notify(Failed, handler => handler("无法确认或启动 PawnIO 服务；传感器将按实际可用状态显示。"), nameof(Failed));
         }
     }
 
-    static void Update(IHardware? hw)
+    static bool Update(IHardware? hw)
     {
-        if (hw == null) return;
-        try { hw.Update(); } catch { /* 单次更新失败用旧值 */ }
+        if (hw == null) return false;
+        try { hw.Update(); return true; }
+        catch (Exception ex)
+        {
+            Trace.WriteLine("传感器硬件更新失败：" + ex);
+            return false;
+        }
     }
 
     static double? Valid(ISensor? s) =>
-        s?.Value is float v && v > 0 ? v : null;
+        s?.Value is float v && float.IsFinite(v) && v > 0 ? v : null;
 
     /// <summary>按关键词序优先匹配（每个关键词取第一个名字包含它的传感器），全不中退回该类第一个。</summary>
     static ISensor? Find(IHardware? hw, SensorType type, params string[] keywords)
